@@ -137,6 +137,8 @@ void parse_program_options(int argc, char *argv[], rdma_context &ctx) {
 
     if (vm.count("server"))
         ctx.server = true;
+    ctx.local.resize(ctx.num_nodes);
+    ctx.remote.resize(ctx.num_nodes);
 }
 
 void get_device(rdma_context &ctx) {
@@ -193,6 +195,8 @@ void create_cqs(rdma_context &ctx) {
 }
 
 void create_qps(rdma_context &ctx) {
+    ctx.send_qps.resize(ctx.num_nodes);
+    ctx.write_qps.resize(ctx.num_nodes);
     memset(&ctx.qp_init_attr, 0, sizeof(ctx.qp_init_attr));
 
     ctx.qp_init_attr.recv_cq = ctx.send_cq;
@@ -208,25 +212,23 @@ void create_qps(rdma_context &ctx) {
 
     for (int i = 0; i < ctx.num_nodes; i++) {
         // create a QP (queue pair) for the send operations, using ibv_create_qp
-        auto send_qp = ibv_create_qp(ctx.pd, &ctx.qp_init_attr);
-        if (!send_qp) {
+        ctx.send_qps[i] = ibv_create_qp(ctx.pd, &ctx.qp_init_attr);
+        if (!ctx.send_qps[i]) {
             cerr << "ibv_create_qp failed: " << strerror(errno) << endl;
             ibv_destroy_cq(ctx.write_cq);
             exit(1);
         }
-        ctx.send_qps.push_back(send_qp);
 
         ctx.qp_init_attr.recv_cq = ctx.write_cq;
         ctx.qp_init_attr.send_cq = ctx.write_cq;
 
         // create a QP for the write operations, using ibv_create_qp
-        auto write_qp = ibv_create_qp(ctx.pd, &ctx.qp_init_attr);
-        if (!write_qp) {
+        ctx.write_qps[i]= ibv_create_qp(ctx.pd, &ctx.qp_init_attr);
+        if (!ctx.write_qps[i]) {
             cerr << "ibv_create_qp failed: " << strerror(errno) << endl;
-            ibv_destroy_qp(send_qp);
+            ibv_destroy_qp(ctx.send_qps[i]);
             exit(1);
         }
-        ctx.write_qps.push_back(write_qp);
     }
 }
 
@@ -261,27 +263,25 @@ void modify_qps_init(rdma_context &ctx) {
 }
 
 void find_gid(rdma_context &ctx) {
+    ctx.local.resize(ctx.num_nodes);
     // use ibv_query_port to get information about port number 1
     ibv_query_port(ctx.context, 1, &ctx.port_attr);
 
     // fill gidEntries with the GID table entries of the port, using ibv_query_gid_table
     ibv_query_gid_table(ctx.context, ctx.gidEntries, ctx.port_attr.gid_tbl_len, 0);
 
-    for (auto &entry: ctx.gidEntries) {
-        // we want only RoCEv2
-        if (entry.gid_type != IBV_GID_TYPE_ROCE_V2)
-            continue;
+    for (int i = 0; i < ctx.num_nodes; ++i) {
+        for (auto &entry: ctx.gidEntries) {
+            // we want only RoCEv2
+            if (entry.gid_type != IBV_GID_TYPE_ROCE_V2)
+                continue;
 
-        in6_addr addr;
-        memcpy(&addr, &entry.gid.global, sizeof(addr));
+            in6_addr addr;
+            memcpy(&addr, &entry.gid.global, sizeof(addr));
 
-        char interface_id[INET6_ADDRSTRLEN];
-        inet_ntop(AF_INET6, &addr, interface_id, INET6_ADDRSTRLEN);
+            char interface_id[INET6_ADDRSTRLEN];
+            inet_ntop(AF_INET6, &addr, interface_id, INET6_ADDRSTRLEN);
 
-        uint32_t ip;
-        inet_pton(AF_INET, interface_id + strlen("::ffff:"), &ip);
-
-        for (int i = 0; i < ctx.num_nodes; i++) {
             if (strncmp(ctx.ip_str.c_str(), interface_id + strlen("::ffff:"), INET_ADDRSTRLEN) == 0) {
                 ctx.gidIndex = entry.gid_index;
                 memcpy(&ctx.local[i].gid, &entry.gid, sizeof(ctx.local[i].gid));
@@ -289,6 +289,7 @@ void find_gid(rdma_context &ctx) {
             }
         }
     }
+
 
     // GID index 0 should never be used
     if (ctx.gidIndex == 0) {
@@ -301,6 +302,8 @@ void find_gid(rdma_context &ctx) {
 }
 
 void register_memory(rdma_context &ctx) {
+    ctx.send_mrs.resize(ctx.num_nodes);
+    ctx.write_mrs.resize(ctx.num_nodes);
     auto flags = IBV_ACCESS_LOCAL_WRITE |
                  IBV_ACCESS_REMOTE_WRITE |
                  IBV_ACCESS_REMOTE_READ;
@@ -308,27 +311,25 @@ void register_memory(rdma_context &ctx) {
     for (int i = 0; i < ctx.num_nodes; i++) {
         // register the "data_send" and "data_write" buffers for RDMA operations, using ibv_reg_mr;
         // store the resulting mrs in send_mr and write_mr
-        auto send_mr = ibv_reg_mr(ctx.pd, ctx.data_send, sizeof(ctx.data_send), flags);
-        if (!send_mr) {
+        ctx.send_mrs[i]  = ibv_reg_mr(ctx.pd, ctx.data_send, sizeof(ctx.data_send), flags);
+        if (!ctx.send_mrs[i]) {
             cerr << "ibv_reg_mr failed for node: " << i << " error: " << strerror(errno) << endl;
             for (int j = 0; j < i; j++) {
                 ibv_destroy_qp(ctx.write_qps[j]);
             }
             exit(1);
         }
-        ctx.send_mrs.push_back(send_mr);
 
-        auto write_mr = ibv_reg_mr(ctx.pd, ctx.data_write, sizeof(ctx.data_write), flags);
-        if (!write_mr) {
+        ctx.write_mrs[i] = ibv_reg_mr(ctx.pd, ctx.data_write, sizeof(ctx.data_write), flags);
+        if (!ctx.write_mrs[i]) {
             cerr << "ibv_reg_mr failed for node: " << i << " error: " << strerror(errno) << endl;
             for (int j = 0; j < i; j++) {
                 ibv_dereg_mr(ctx.send_mrs[j]);
             }
             exit(1);
         }
-        ctx.write_mrs.push_back(write_mr);
 
-        memcpy(&ctx.local[i].write_mr, write_mr, sizeof(ctx.local[i].write_mr));
+        memcpy(&ctx.local[i].write_mr, ctx.write_mrs[i], sizeof(ctx.local[i].write_mr));
         ctx.local[i].send_qp_num = ctx.send_qps[i]->qp_num;
         ctx.local[i].write_qp_num = ctx.write_qps[i]->qp_num;
     }
