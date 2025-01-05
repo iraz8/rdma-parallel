@@ -85,7 +85,7 @@ struct rdma_context {
     vector<ibv_qp *> write_qps;
     ibv_qp_attr qp_attr{};
     ibv_port_attr port_attr{};
-    device_info local{};
+    vector<device_info> local{};
     vector<device_info> remote{};
     ibv_gid_entry gidEntries[255];
     ibv_sge sg_send{}, sg_write{}, sg_recv{};
@@ -281,10 +281,12 @@ void find_gid(rdma_context &ctx) {
         uint32_t ip;
         inet_pton(AF_INET, interface_id + strlen("::ffff:"), &ip);
 
-        if (strncmp(ctx.ip_str.c_str(), interface_id + strlen("::ffff:"), INET_ADDRSTRLEN) == 0) {
-            ctx.gidIndex = entry.gid_index;
-            memcpy(&ctx.local.gid, &entry.gid, sizeof(ctx.local.gid));
-            break;
+        for (int i = 0; i < ctx.num_nodes; i++) {
+            if (strncmp(ctx.ip_str.c_str(), interface_id + strlen("::ffff:"), INET_ADDRSTRLEN) == 0) {
+                ctx.gidIndex = entry.gid_index;
+                memcpy(&ctx.local[i].gid, &entry.gid, sizeof(ctx.local[i].gid));
+                break;
+            }
         }
     }
 
@@ -326,13 +328,14 @@ void register_memory(rdma_context &ctx) {
         }
         ctx.write_mrs.push_back(write_mr);
 
-        memcpy(&ctx.local.write_mr, write_mr, sizeof(ctx.local.write_mr));
-        ctx.local.send_qp_num = ctx.send_qps[i]->qp_num;
-        ctx.local.write_qp_num = ctx.write_qps[i]->qp_num;
+        memcpy(&ctx.local[i].write_mr, write_mr, sizeof(ctx.local[i].write_mr));
+        ctx.local[i].send_qp_num = ctx.send_qps[i]->qp_num;
+        ctx.local[i].write_qp_num = ctx.write_qps[i]->qp_num;
     }
 }
 
 void exchange_data_info(rdma_context &ctx) {
+    ctx.remote.resize(ctx.num_nodes);
     for (int i = 0; i < ctx.num_nodes; i++) {
         // exchange data between the 2 applications
         if (ctx.server) {
@@ -343,14 +346,14 @@ void exchange_data_info(rdma_context &ctx) {
                 exit(1);
             }
 
-            ctx.ret = send_data(ctx.local, ctx.remote_ip_str, i);
+            ctx.ret = send_data(ctx.local[i], ctx.remote_ip_str, i);
             if (ctx.ret != 0) {
                 cerr << "send_data failed for node: " << i << endl;
                 ibv_dereg_mr(ctx.write_mrs[i]);
                 exit(1);
             }
         } else {
-            ctx.ret = send_data(ctx.local, ctx.remote_ip_str, i);
+            ctx.ret = send_data(ctx.local[i], ctx.remote_ip_str, i);
             if (ctx.ret != 0) {
                 cerr << "send_data failed for node: " << i << endl;
                 ibv_dereg_mr(ctx.write_mrs[i]);
