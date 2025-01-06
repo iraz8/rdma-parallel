@@ -104,39 +104,39 @@ int receive_data_all(rdma_context &ctx) {
     int sockfd, connfd;
     struct sockaddr_in servaddr;
 
-    sockfd = socket(AF_INET, SOCK_STREAM, 0);
-    if (sockfd == -1) {
-        cerr << "[receive_data_all] Socket creation failed: " << strerror(errno) << endl;
-        return 1;
-    }
+    for (int i = 0; i < ctx.num_nodes; i++) {  // Loop to listen on multiple ports
+        sockfd = socket(AF_INET, SOCK_STREAM, 0);
+        if (sockfd == -1) {
+            cerr << "[receive_data_all] Socket creation failed: " << strerror(errno) << endl;
+            return 1;
+        }
 
-    int opt = 1;
-    if (setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) < 0) {
-        cerr << "[receive_data_all] setsockopt failed: " << strerror(errno) << endl;
-        close(sockfd);
-        return 1;
-    }
+        int opt = 1;
+        if (setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) < 0) {
+            cerr << "[receive_data_all] setsockopt failed: " << strerror(errno) << endl;
+            close(sockfd);
+            return 1;
+        }
 
-    memset(&servaddr, 0, sizeof(servaddr));
-    servaddr.sin_family = AF_INET;
-    servaddr.sin_addr.s_addr = htonl(INADDR_ANY);
-    servaddr.sin_port = htons(8080 + i);  // Single port for all connections
+        memset(&servaddr, 0, sizeof(servaddr));
+        servaddr.sin_family = AF_INET;
+        servaddr.sin_addr.s_addr = htonl(INADDR_ANY);
+        servaddr.sin_port = htons(8080 + i); // Different port for each node
 
-    if (bind(sockfd, (struct sockaddr*)&servaddr, sizeof(servaddr)) != 0) {
-        cerr << "[receive_data_all] Bind failed: " << strerror(errno) << endl;
-        close(sockfd);
-        return 1;
-    }
+        if (bind(sockfd, (struct sockaddr*)&servaddr, sizeof(servaddr)) != 0) {
+            cerr << "[receive_data_all] Bind failed on port " << 8080 + i << ": " << strerror(errno) << endl;
+            close(sockfd);
+            return 1;
+        }
 
-    if (listen(sockfd, ctx.num_nodes) != 0) {  // Allow multiple clients in queue
-        cerr << "[receive_data_all] Listen failed: " << strerror(errno) << endl;
-        close(sockfd);
-        return 1;
-    }
+        if (listen(sockfd, 1) != 0) {
+            cerr << "[receive_data_all] Listen failed on port " << 8080 + i << ": " << strerror(errno) << endl;
+            close(sockfd);
+            return 1;
+        }
 
-    cout << "[receive_data_all] Server ready to accept " << ctx.num_nodes << " connections." << endl;
+        cout << "[receive_data_all] Server ready on port " << 8080 + i << " for node " << i << "." << endl;
 
-    for (int i = 0; i < ctx.num_nodes; i++) {
         connfd = accept(sockfd, NULL, NULL);
         if (connfd < 0) {
             cerr << "[receive_data_all] Accept failed for node " << i << ": " << strerror(errno) << endl;
@@ -148,13 +148,15 @@ int receive_data_all(rdma_context &ctx) {
         if (read(connfd, &ctx.remote[i], sizeof(ctx.remote[i])) <= 0) {
             cerr << "[receive_data_all] Failed to receive data for node " << i << ": " << strerror(errno) << endl;
             close(connfd);
+            close(sockfd);
             return 1;
         }
         close(connfd);
+        close(sockfd);
     }
-    close(sockfd);
     return 0;
 }
+
 
 
 int send_data_all(rdma_context &ctx) {
