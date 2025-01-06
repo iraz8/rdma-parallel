@@ -74,7 +74,7 @@ int receive_data_all(rdma_context &ctx) {
         return 1;
     }
 
-    if (listen(sockfd, ctx.num_nodes) != 0) {
+    if (listen(sockfd, ctx.num_nodes * 2) != 0) {
         cerr << "[receive_data_all] Listen failed: " << strerror(errno) << endl;
         close(sockfd);
         return 1;
@@ -82,44 +82,43 @@ int receive_data_all(rdma_context &ctx) {
 
     cout << "[receive_data_all] Server listening on port 8080." << endl;
 
-    for (int i = 0; i < ctx.num_nodes; i++) {
+    int accepted_connections = 0;
+    while (accepted_connections < ctx.num_nodes) {
         connfd = accept(sockfd, NULL, NULL);
         if (connfd < 0) {
-            cerr << "[receive_data_all] Accept failed for node " << i << ": " << strerror(errno) << endl;
+            cerr << "[receive_data_all] Accept failed: " << strerror(errno) << endl;
             close(sockfd);
             return 1;
         }
+        cout << "[receive_data_all] Accepted connection." << endl;
 
-        cout << "[receive_data_all] Accepted connection from node " << i << endl;
-        if (read(connfd, &ctx.remote[i], sizeof(ctx.remote[i])) <= 0) {
-            cerr << "[receive_data_all] Failed to receive data for node " << i << ": " << strerror(errno) << endl;
+        if (read(connfd, &ctx.remote[accepted_connections], sizeof(ctx.remote[accepted_connections])) <= 0) {
+            cerr << "[receive_data_all] Failed to receive data: " << strerror(errno) << endl;
             close(connfd);
-            close(sockfd);
-            return 1;
+            continue;
         }
+        accepted_connections++;
         close(connfd);
     }
     close(sockfd);
     return 0;
 }
 
+
 int send_data_all(rdma_context &ctx) {
     for (int i = 0; i < ctx.num_nodes; i++) {
         int sockfd;
         struct sockaddr_in servaddr;
-
         sockfd = socket(AF_INET, SOCK_STREAM, 0);
         if (sockfd == -1) {
             cerr << "[send_data_all] Socket creation failed for node " << i << ": " << strerror(errno) << endl;
-            return 1;
+            continue;
         }
-
         servaddr.sin_family = AF_INET;
         servaddr.sin_addr.s_addr = inet_addr(ctx.remote_ip_strs[i].c_str());
         servaddr.sin_port = htons(8080);
 
         cout << "[send_data_all] Attempting to connect to " << ctx.remote_ip_strs[i] << " on port 8080." << endl;
-
         int retry_count = 30;
         while (connect(sockfd, (struct sockaddr *) &servaddr, sizeof(servaddr)) != 0 && retry_count > 0) {
             cerr << "[send_data_all] Connection retrying... (" << retry_count << " attempts left)" << endl;
@@ -128,16 +127,15 @@ int send_data_all(rdma_context &ctx) {
         }
 
         if (retry_count == 0) {
-            cerr << "[send_data_all] Connection failed for node " << i << endl;
+            cerr << "[send_data_all] Connection failed for node " << i << ". Skipping." << endl;
             close(sockfd);
-            return 1;
+            continue;
         }
 
-        cout << "[send_data_all] Connection established with node " << i << endl;
         if (write(sockfd, &ctx.local[i], sizeof(ctx.local[i])) <= 0) {
             cerr << "[send_data_all] Write failed for node " << i << ": " << strerror(errno) << endl;
             close(sockfd);
-            return 1;
+            continue;
         }
         close(sockfd);
     }
@@ -315,15 +313,12 @@ void modify_qps_init(rdma_context &ctx) {
 
 void find_gid(rdma_context &ctx) {
     ctx.local.resize(ctx.num_nodes);
-    // use ibv_query_port to get information about port number 1
     ibv_query_port(ctx.context, 1, &ctx.port_attr);
-
-    // fill gidEntries with the GID table entries of the port, using ibv_query_gid_table
     ibv_query_gid_table(ctx.context, ctx.gidEntries, ctx.port_attr.gid_tbl_len, 0);
 
     for (int i = 0; i < ctx.num_nodes; ++i) {
+        bool gid_found = false;
         for (auto &entry: ctx.gidEntries) {
-            // we want only RoCEv2
             if (entry.gid_type != IBV_GID_TYPE_ROCE_V2)
                 continue;
 
@@ -334,23 +329,18 @@ void find_gid(rdma_context &ctx) {
             inet_ntop(AF_INET6, &addr, interface_id, INET6_ADDRSTRLEN);
 
             if (strncmp(ctx.ip_strs[i].c_str(), interface_id + strlen("::ffff:"), INET_ADDRSTRLEN) == 0) {
-                ctx.gidIndex = entry.gid_index;
-                memcpy(&ctx.local[i].gid, &entry.gid, sizeof(ctx.local[i].gid));
+                ctx.local[i].gid = entry.gid;
+                gid_found = true;
                 break;
             }
         }
-    }
-
-
-    // GID index 0 should never be used
-    if (ctx.gidIndex == 0) {
-        cerr << "Given IP not found in GID table" << endl;
-        for (int i = 0; i < ctx.num_nodes; i++) {
-            ibv_destroy_qp(ctx.write_qps[i]);
+        if (!gid_found) {
+            cerr << "GID not found for node " << i << endl;
+            exit(1);
         }
-        exit(1);
     }
 }
+
 
 void register_memory(rdma_context &ctx) {
     ctx.send_mrs.resize(ctx.num_nodes);
