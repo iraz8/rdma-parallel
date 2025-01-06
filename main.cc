@@ -46,97 +46,43 @@ struct rdma_context {
     int num_nodes = 0;
 };
 
-int receive_data(struct device_info &data, int node_nr) {
-    int sockfd, connfd, len;
-    struct sockaddr_in servaddr;
-
-    sockfd = socket(AF_INET, SOCK_STREAM, 0);
-    if (sockfd == -1)
-        return 1;
-
-    memset(&servaddr, 0, sizeof(servaddr));
-
-    servaddr.sin_family = AF_INET;
-    servaddr.sin_addr.s_addr = htonl(INADDR_ANY);
-    servaddr.sin_port = htons(8080 + node_nr);
-
-    if ((bind(sockfd, (struct sockaddr *) &servaddr, sizeof(servaddr))) != 0)
-        return 1;
-
-    if ((listen(sockfd, 5)) != 0)
-        return 1;
-
-    connfd = accept(sockfd, NULL, NULL);
-    if (connfd < 0)
-        return 1;
-
-    read(connfd, &data, sizeof(data));
-
-    close(sockfd);
-
-    return 0;
-}
-
-
-int send_data(const struct device_info &data, string ip, int node_nr) {
-    int sockfd;
-    struct sockaddr_in servaddr;
-
-    sockfd = socket(AF_INET, SOCK_STREAM, 0);
-    if (sockfd == -1)
-        return 1;
-
-    servaddr.sin_family = AF_INET;
-    servaddr.sin_addr.s_addr = inet_addr(ip.c_str());
-    servaddr.sin_port = htons(8080 + node_nr);
-
-    if (connect(sockfd, (struct sockaddr *) &servaddr, sizeof(servaddr)) != 0)
-        return 1;
-
-    write(sockfd, &data, sizeof(data));
-
-    close(sockfd);
-
-    return 0;
-}
-
 int receive_data_all(rdma_context &ctx) {
     int sockfd, connfd;
     struct sockaddr_in servaddr;
 
-    for (int i = 0; i < ctx.num_nodes; i++) {  // Loop to listen on multiple ports
-        sockfd = socket(AF_INET, SOCK_STREAM, 0);
-        if (sockfd == -1) {
-            cerr << "[receive_data_all] Socket creation failed: " << strerror(errno) << endl;
-            return 1;
-        }
+    sockfd = socket(AF_INET, SOCK_STREAM, 0);
+    if (sockfd == -1) {
+        cerr << "[receive_data_all] Socket creation failed: " << strerror(errno) << endl;
+        return 1;
+    }
 
-        int opt = 1;
-        if (setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) < 0) {
-            cerr << "[receive_data_all] setsockopt failed: " << strerror(errno) << endl;
-            close(sockfd);
-            return 1;
-        }
+    int opt = 1;
+    if (setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) < 0) {
+        cerr << "[receive_data_all] setsockopt failed: " << strerror(errno) << endl;
+        close(sockfd);
+        return 1;
+    }
 
-        memset(&servaddr, 0, sizeof(servaddr));
-        servaddr.sin_family = AF_INET;
-        servaddr.sin_addr.s_addr = htonl(INADDR_ANY);
-        servaddr.sin_port = htons(8080 + i); // Different port for each node
+    memset(&servaddr, 0, sizeof(servaddr));
+    servaddr.sin_family = AF_INET;
+    servaddr.sin_addr.s_addr = htonl(INADDR_ANY);
+    servaddr.sin_port = htons(8080);
 
-        if (bind(sockfd, (struct sockaddr*)&servaddr, sizeof(servaddr)) != 0) {
-            cerr << "[receive_data_all] Bind failed on port " << 8080 + i << ": " << strerror(errno) << endl;
-            close(sockfd);
-            return 1;
-        }
+    if (bind(sockfd, (struct sockaddr *) &servaddr, sizeof(servaddr)) != 0) {
+        cerr << "[receive_data_all] Bind failed: " << strerror(errno) << endl;
+        close(sockfd);
+        return 1;
+    }
 
-        if (listen(sockfd, 1) != 0) {
-            cerr << "[receive_data_all] Listen failed on port " << 8080 + i << ": " << strerror(errno) << endl;
-            close(sockfd);
-            return 1;
-        }
+    if (listen(sockfd, ctx.num_nodes) != 0) {
+        cerr << "[receive_data_all] Listen failed: " << strerror(errno) << endl;
+        close(sockfd);
+        return 1;
+    }
 
-        cout << "[receive_data_all] Server ready on port " << 8080 + i << " for node " << i << "." << endl;
+    cout << "[receive_data_all] Server listening on port 8080." << endl;
 
+    for (int i = 0; i < ctx.num_nodes; i++) {
         connfd = accept(sockfd, NULL, NULL);
         if (connfd < 0) {
             cerr << "[receive_data_all] Accept failed for node " << i << ": " << strerror(errno) << endl;
@@ -152,12 +98,10 @@ int receive_data_all(rdma_context &ctx) {
             return 1;
         }
         close(connfd);
-        close(sockfd);
     }
+    close(sockfd);
     return 0;
 }
-
-
 
 int send_data_all(rdma_context &ctx) {
     for (int i = 0; i < ctx.num_nodes; i++) {
@@ -172,12 +116,12 @@ int send_data_all(rdma_context &ctx) {
 
         servaddr.sin_family = AF_INET;
         servaddr.sin_addr.s_addr = inet_addr(ctx.remote_ip_strs[i].c_str());
-        servaddr.sin_port = htons(8080 + i);
+        servaddr.sin_port = htons(8080);
 
-        cout << "[send_data_all] Attempting to connect to " << ctx.remote_ip_strs[i] << endl;
+        cout << "[send_data_all] Attempting to connect to " << ctx.remote_ip_strs[i] << " on port 8080." << endl;
 
         int retry_count = 30;
-        while (connect(sockfd, (struct sockaddr*)&servaddr, sizeof(servaddr)) != 0 && retry_count > 0) {
+        while (connect(sockfd, (struct sockaddr *) &servaddr, sizeof(servaddr)) != 0 && retry_count > 0) {
             cerr << "[send_data_all] Connection retrying... (" << retry_count << " attempts left)" << endl;
             sleep(1);
             retry_count--;
@@ -442,42 +386,6 @@ void register_memory(rdma_context &ctx) {
     }
 }
 
-// void exchange_data_info(rdma_context &ctx) {
-//     ctx.remote.resize(ctx.num_nodes);
-//     for (int i = 0; i < ctx.num_nodes; i++) {
-//         // exchange data between the 2 applications
-//         if (ctx.server) {
-//             ctx.ret = receive_data(ctx.remote[i], i);
-//             if (ctx.ret != 0) {
-//                 cerr << "receive_data failed for node: " << i << endl;
-//                 ibv_dereg_mr(ctx.write_mrs[i]);
-//                 exit(1);
-//             }
-//
-//             ctx.ret = send_data(ctx.local[i], ctx.remote_ip_strs[i], i);
-//             if (ctx.ret != 0) {
-//                 cerr << "send_data failed for node: " << i << endl;
-//                 ibv_dereg_mr(ctx.write_mrs[i]);
-//                 exit(1);
-//             }
-//         } else {
-//             ctx.ret = send_data(ctx.local[i], ctx.remote_ip_strs[i], i);
-//             if (ctx.ret != 0) {
-//                 cerr << "send_data failed for node: " << i << endl;
-//                 ibv_dereg_mr(ctx.write_mrs[i]);
-//                 exit(1);
-//             }
-//
-//             ctx.ret = receive_data(ctx.remote[i], i);
-//             if (ctx.ret != 0) {
-//                 cerr << "receive_data failed for node: " << i << endl;
-//                 ibv_dereg_mr(ctx.write_mrs[i]);
-//                 exit(1);
-//             }
-//         }
-//     }
-// }
-
 void exchange_data_info(rdma_context &ctx) {
     if (ctx.server) {
         if (receive_data_all(ctx) != 0) {
@@ -707,6 +615,30 @@ void client_flow(rdma_context &ctx) {
     }
 }
 
+void cleanup_resources(rdma_context &ctx) {
+    for (int i = 0; i < ctx.num_nodes; i++) {
+        if (ctx.send_mrs[i])
+            ibv_dereg_mr(ctx.send_mrs[i]);
+        if (ctx.write_mrs[i])
+            ibv_dereg_mr(ctx.write_mrs[i]);
+        if (ctx.send_qps[i])
+            ibv_destroy_qp(ctx.send_qps[i]);
+        if (ctx.write_qps[i])
+            ibv_destroy_qp(ctx.write_qps[i]);
+    }
+    if (ctx.send_cq)
+        ibv_destroy_cq(ctx.send_cq);
+    if (ctx.write_cq)
+        ibv_destroy_cq(ctx.write_cq);
+    if (ctx.pd)
+        ibv_dealloc_pd(ctx.pd);
+    if (ctx.context)
+        ibv_close_device(ctx.context);
+    if (ctx.dev_list)
+        ibv_free_device_list(ctx.dev_list);
+}
+
+
 int main(int argc, char *argv[]) {
     rdma_context ctx;
 
@@ -718,14 +650,21 @@ int main(int argc, char *argv[]) {
     modify_qps_init(ctx);
     find_gid(ctx);
     register_memory(ctx);
-    exchange_data_info(ctx);
-    modify_qps_rtr(ctx);
-    modify_qps_rts(ctx);
-    if (ctx.server) {
-        server_flow(ctx);
-    } else {
-        client_flow(ctx);
+    try {
+        exchange_data_info(ctx);
+        modify_qps_rtr(ctx);
+        modify_qps_rts(ctx);
+        if (ctx.server) {
+            server_flow(ctx);
+        } else {
+            client_flow(ctx);
+        }
+    } catch (const std::exception &e) {
+        cerr << "An error occurred: " << e.what() << endl;
+        cleanup_resources(ctx);
+        return 1;
     }
 
+    cleanup_resources(ctx);
     return 0;
 }
