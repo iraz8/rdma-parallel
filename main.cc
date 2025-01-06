@@ -14,59 +14,6 @@ struct device_info {
     struct ibv_mr write_mr;
 };
 
-int receive_data(struct device_info &data, int node_nr) {
-    int sockfd, connfd, len;
-    struct sockaddr_in servaddr;
-
-    sockfd = socket(AF_INET, SOCK_STREAM, 0);
-    if (sockfd == -1)
-        return 1;
-
-    memset(&servaddr, 0, sizeof(servaddr));
-
-    servaddr.sin_family = AF_INET;
-    servaddr.sin_addr.s_addr = htonl(INADDR_ANY);
-    servaddr.sin_port = htons(8080 + node_nr);
-
-    if ((bind(sockfd, (struct sockaddr *) &servaddr, sizeof(servaddr))) != 0)
-        return 1;
-
-    if ((listen(sockfd, 5)) != 0)
-        return 1;
-
-    connfd = accept(sockfd, NULL, NULL);
-    if (connfd < 0)
-        return 1;
-
-    read(connfd, &data, sizeof(data));
-
-    close(sockfd);
-
-    return 0;
-}
-
-int send_data(const struct device_info &data, string ip, int node_nr) {
-    int sockfd;
-    struct sockaddr_in servaddr;
-
-    sockfd = socket(AF_INET, SOCK_STREAM, 0);
-    if (sockfd == -1)
-        return 1;
-
-    servaddr.sin_family = AF_INET;
-    servaddr.sin_addr.s_addr = inet_addr(ip.c_str());
-    servaddr.sin_port = htons(8080 + node_nr);
-
-    if (connect(sockfd, (struct sockaddr *) &servaddr, sizeof(servaddr)) != 0)
-        return 1;
-
-    write(sockfd, &data, sizeof(data));
-
-    close(sockfd);
-
-    return 0;
-}
-
 struct rdma_context {
     bool server = false;
     int num_devices = 0;
@@ -98,6 +45,82 @@ struct rdma_context {
     ibv_wc wc{};
     int num_nodes = 0;
 };
+
+int receive_data(struct device_info &data, int node_nr) {
+    int sockfd, connfd, len;
+    struct sockaddr_in servaddr;
+
+    sockfd = socket(AF_INET, SOCK_STREAM, 0);
+    if (sockfd == -1)
+        return 1;
+
+    memset(&servaddr, 0, sizeof(servaddr));
+
+    servaddr.sin_family = AF_INET;
+    servaddr.sin_addr.s_addr = htonl(INADDR_ANY);
+    servaddr.sin_port = htons(8080 + node_nr);
+
+    if ((bind(sockfd, (struct sockaddr *) &servaddr, sizeof(servaddr))) != 0)
+        return 1;
+
+    if ((listen(sockfd, 5)) != 0)
+        return 1;
+
+    connfd = accept(sockfd, NULL, NULL);
+    if (connfd < 0)
+        return 1;
+
+    read(connfd, &data, sizeof(data));
+
+    close(sockfd);
+
+    return 0;
+}
+
+
+int send_data(const struct device_info &data, string ip, int node_nr) {
+    int sockfd;
+    struct sockaddr_in servaddr;
+
+    sockfd = socket(AF_INET, SOCK_STREAM, 0);
+    if (sockfd == -1)
+        return 1;
+
+    servaddr.sin_family = AF_INET;
+    servaddr.sin_addr.s_addr = inet_addr(ip.c_str());
+    servaddr.sin_port = htons(8080 + node_nr);
+
+    if (connect(sockfd, (struct sockaddr *) &servaddr, sizeof(servaddr)) != 0)
+        return 1;
+
+    write(sockfd, &data, sizeof(data));
+
+    close(sockfd);
+
+    return 0;
+}
+
+int receive_data_all(rdma_context &ctx) {
+    for (int i = 0; i < ctx.num_nodes; ++i) {
+        int ret = receive_data(ctx.remote[i], i);
+        if (ret != 0) {
+            cerr << "receive_data_all failed for node " << i << endl;
+            return 1;
+        }
+    }
+    return 0;
+}
+
+int send_data_all(rdma_context &ctx) {
+    for (int i = 0; i < ctx.num_nodes; ++i) {
+        int ret = send_data(ctx.local[i], ctx.remote_ip_strs[i], i);
+        if (ret != 0) {
+            cerr << "send_data_all failed for node " << i << endl;
+            return 1;
+        }
+    }
+    return 0;
+}
 
 void parse_program_options(int argc, char *argv[], rdma_context &ctx) {
     auto flags = IBV_ACCESS_LOCAL_WRITE |
@@ -340,38 +363,72 @@ void register_memory(rdma_context &ctx) {
     }
 }
 
+// void exchange_data_info(rdma_context &ctx) {
+//     ctx.remote.resize(ctx.num_nodes);
+//     for (int i = 0; i < ctx.num_nodes; i++) {
+//         // exchange data between the 2 applications
+//         if (ctx.server) {
+//             ctx.ret = receive_data(ctx.remote[i], i);
+//             if (ctx.ret != 0) {
+//                 cerr << "receive_data failed for node: " << i << endl;
+//                 ibv_dereg_mr(ctx.write_mrs[i]);
+//                 exit(1);
+//             }
+//
+//             ctx.ret = send_data(ctx.local[i], ctx.remote_ip_strs[i], i);
+//             if (ctx.ret != 0) {
+//                 cerr << "send_data failed for node: " << i << endl;
+//                 ibv_dereg_mr(ctx.write_mrs[i]);
+//                 exit(1);
+//             }
+//         } else {
+//             ctx.ret = send_data(ctx.local[i], ctx.remote_ip_strs[i], i);
+//             if (ctx.ret != 0) {
+//                 cerr << "send_data failed for node: " << i << endl;
+//                 ibv_dereg_mr(ctx.write_mrs[i]);
+//                 exit(1);
+//             }
+//
+//             ctx.ret = receive_data(ctx.remote[i], i);
+//             if (ctx.ret != 0) {
+//                 cerr << "receive_data failed for node: " << i << endl;
+//                 ibv_dereg_mr(ctx.write_mrs[i]);
+//                 exit(1);
+//             }
+//         }
+//     }
+// }
+
 void exchange_data_info(rdma_context &ctx) {
-    ctx.remote.resize(ctx.num_nodes);
-    for (int i = 0; i < ctx.num_nodes; i++) {
-        // exchange data between the 2 applications
-        if (ctx.server) {
-            ctx.ret = receive_data(ctx.remote[i], i);
-            if (ctx.ret != 0) {
-                cerr << "receive_data failed for node: " << i << endl;
-                ibv_dereg_mr(ctx.write_mrs[i]);
-                exit(1);
+    if (ctx.server) {
+        if (receive_data_all(ctx) != 0) {
+            cerr << "Error receiving data from all nodes." << endl;
+            for (auto &mr: ctx.write_mrs) {
+                ibv_dereg_mr(mr);
             }
-
-            ctx.ret = send_data(ctx.local[i], ctx.remote_ip_strs[i], i);
-            if (ctx.ret != 0) {
-                cerr << "send_data failed for node: " << i << endl;
-                ibv_dereg_mr(ctx.write_mrs[i]);
-                exit(1);
+            exit(1);
+        }
+        if (send_data_all(ctx) != 0) {
+            cerr << "Error sending data to all nodes." << endl;
+            for (auto &mr: ctx.write_mrs) {
+                ibv_dereg_mr(mr);
             }
-        } else {
-            ctx.ret = send_data(ctx.local[i], ctx.remote_ip_strs[i], i);
-            if (ctx.ret != 0) {
-                cerr << "send_data failed for node: " << i << endl;
-                ibv_dereg_mr(ctx.write_mrs[i]);
-                exit(1);
+            exit(1);
+        }
+    } else {
+        if (send_data_all(ctx) != 0) {
+            cerr << "Error sending data to all nodes." << endl;
+            for (auto &mr: ctx.write_mrs) {
+                ibv_dereg_mr(mr);
             }
-
-            ctx.ret = receive_data(ctx.remote[i], i);
-            if (ctx.ret != 0) {
-                cerr << "receive_data failed for node: " << i << endl;
-                ibv_dereg_mr(ctx.write_mrs[i]);
-                exit(1);
+            exit(1);
+        }
+        if (receive_data_all(ctx) != 0) {
+            cerr << "Error receiving data from all nodes." << endl;
+            for (auto &mr: ctx.write_mrs) {
+                ibv_dereg_mr(mr);
             }
+            exit(1);
         }
     }
 }
