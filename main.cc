@@ -101,26 +101,96 @@ int send_data(const struct device_info &data, string ip, int node_nr) {
 }
 
 int receive_data_all(rdma_context &ctx) {
+    int sockfd, connfd;
+    struct sockaddr_in servaddr;
+
+    sockfd = socket(AF_INET, SOCK_STREAM, 0);
+    if (sockfd == -1) {
+        cerr << "[receive_data_all] Socket creation failed: " << strerror(errno) << endl;
+        return 1;
+    }
+
+    memset(&servaddr, 0, sizeof(servaddr));
+    servaddr.sin_family = AF_INET;
+    servaddr.sin_addr.s_addr = htonl(INADDR_ANY);
+    servaddr.sin_port = htons(8080);  // Single port for all connections
+
+    if (bind(sockfd, (struct sockaddr*)&servaddr, sizeof(servaddr)) != 0) {
+        cerr << "[receive_data_all] Bind failed: " << strerror(errno) << endl;
+        close(sockfd);
+        return 1;
+    }
+
+    if (listen(sockfd, ctx.num_nodes) != 0) {  // Allow multiple clients in queue
+        cerr << "[receive_data_all] Listen failed: " << strerror(errno) << endl;
+        close(sockfd);
+        return 1;
+    }
+
+    cout << "[receive_data_all] Server ready to accept " << ctx.num_nodes << " connections." << endl;
+
     for (int i = 0; i < ctx.num_nodes; ++i) {
-        int ret = receive_data(ctx.remote[i], i);
-        if (ret != 0) {
-            cerr << "receive_data_all failed for node " << i << endl;
+        connfd = accept(sockfd, NULL, NULL);
+        if (connfd < 0) {
+            cerr << "[receive_data_all] Accept failed for node " << i << ": " << strerror(errno) << endl;
+            close(sockfd);
             return 1;
         }
+
+        cout << "[receive_data_all] Accepted connection from node " << i << endl;
+        if (read(connfd, &ctx.remote[i], sizeof(ctx.remote[i])) <= 0) {
+            cerr << "[receive_data_all] Failed to receive data for node " << i << ": " << strerror(errno) << endl;
+            close(connfd);
+            return 1;
+        }
+        close(connfd);
+    }
+    close(sockfd);
+    return 0;
+}
+
+
+int send_data_all(rdma_context &ctx) {
+    for (int i = 0; i < ctx.num_nodes; ++i) {
+        int sockfd;
+        struct sockaddr_in servaddr;
+
+        sockfd = socket(AF_INET, SOCK_STREAM, 0);
+        if (sockfd == -1) {
+            cerr << "[send_data_all] Socket creation failed for node " << i << ": " << strerror(errno) << endl;
+            return 1;
+        }
+
+        servaddr.sin_family = AF_INET;
+        servaddr.sin_addr.s_addr = inet_addr(ctx.remote_ip_strs[i].c_str());
+        servaddr.sin_port = htons(8080);
+
+        cout << "[send_data_all] Attempting to connect to " << ctx.remote_ip_strs[i] << endl;
+
+        int retry_count = 5;
+        while (connect(sockfd, (struct sockaddr*)&servaddr, sizeof(servaddr)) != 0 && retry_count > 0) {
+            cerr << "[send_data_all] Connection failed, retrying... (" << retry_count << " attempts left)" << endl;
+            sleep(2);
+            retry_count--;
+        }
+
+        if (retry_count == 0) {
+            cerr << "[send_data_all] Connection failed for node " << i << endl;
+            close(sockfd);
+            return 1;
+        }
+
+        cout << "[send_data_all] Connection established with node " << i << endl;
+        if (write(sockfd, &ctx.local[i], sizeof(ctx.local[i])) <= 0) {
+            cerr << "[send_data_all] Write failed for node " << i << ": " << strerror(errno) << endl;
+            close(sockfd);
+            return 1;
+        }
+        close(sockfd);
     }
     return 0;
 }
 
-int send_data_all(rdma_context &ctx) {
-    for (int i = 0; i < ctx.num_nodes; ++i) {
-        int ret = send_data(ctx.local[i], ctx.remote_ip_strs[i], i);
-        if (ret != 0) {
-            cerr << "send_data_all failed for node " << i << endl;
-            return 1;
-        }
-    }
-    return 0;
-}
 
 void parse_program_options(int argc, char *argv[], rdma_context &ctx) {
     auto flags = IBV_ACCESS_LOCAL_WRITE |
