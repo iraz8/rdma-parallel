@@ -110,10 +110,17 @@ int receive_data_all(rdma_context &ctx) {
         return 1;
     }
 
+    int opt = 1;
+    if (setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) < 0) {
+        cerr << "[receive_data_all] setsockopt failed: " << strerror(errno) << endl;
+        close(sockfd);
+        return 1;
+    }
+
     memset(&servaddr, 0, sizeof(servaddr));
     servaddr.sin_family = AF_INET;
     servaddr.sin_addr.s_addr = htonl(INADDR_ANY);
-    servaddr.sin_port = htons(8080);  // Single port for all connections
+    servaddr.sin_port = htons(8080 + i);  // Single port for all connections
 
     if (bind(sockfd, (struct sockaddr*)&servaddr, sizeof(servaddr)) != 0) {
         cerr << "[receive_data_all] Bind failed: " << strerror(errno) << endl;
@@ -129,7 +136,7 @@ int receive_data_all(rdma_context &ctx) {
 
     cout << "[receive_data_all] Server ready to accept " << ctx.num_nodes << " connections." << endl;
 
-    for (int i = 0; i < ctx.num_nodes; ++i) {
+    for (int i = 0; i < ctx.num_nodes; i++) {
         connfd = accept(sockfd, NULL, NULL);
         if (connfd < 0) {
             cerr << "[receive_data_all] Accept failed for node " << i << ": " << strerror(errno) << endl;
@@ -151,7 +158,7 @@ int receive_data_all(rdma_context &ctx) {
 
 
 int send_data_all(rdma_context &ctx) {
-    for (int i = 0; i < ctx.num_nodes; ++i) {
+    for (int i = 0; i < ctx.num_nodes; i++) {
         int sockfd;
         struct sockaddr_in servaddr;
 
@@ -163,14 +170,14 @@ int send_data_all(rdma_context &ctx) {
 
         servaddr.sin_family = AF_INET;
         servaddr.sin_addr.s_addr = inet_addr(ctx.remote_ip_strs[i].c_str());
-        servaddr.sin_port = htons(8080);
+        servaddr.sin_port = htons(8080 + i);
 
         cout << "[send_data_all] Attempting to connect to " << ctx.remote_ip_strs[i] << endl;
 
-        int retry_count = 5;
+        int retry_count = 30;
         while (connect(sockfd, (struct sockaddr*)&servaddr, sizeof(servaddr)) != 0 && retry_count > 0) {
-            cerr << "[send_data_all] Connection failed, retrying... (" << retry_count << " attempts left)" << endl;
-            sleep(2);
+            cerr << "[send_data_all] Connection retrying... (" << retry_count << " attempts left)" << endl;
+            sleep(1);
             retry_count--;
         }
 
