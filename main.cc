@@ -72,7 +72,8 @@ struct rdma_context {
     int num_devices = 0;
     int ret = 0;
     uint32_t gidIndex = 0;
-    string ip_str, remote_ip_str, dev_str;
+    vector<string> ip_strs, remote_ip_strs;
+    string dev_str;
     char data_send[100], data_write[100];
 
     ibv_device **dev_list = nullptr;
@@ -95,7 +96,7 @@ struct rdma_context {
     vector<ibv_mr *> write_mrs;
     ibv_mr remote_write_mr{};
     ibv_wc wc{};
-    int num_nodes = 2;
+    int num_nodes = 0;
 };
 
 void parse_program_options(int argc, char *argv[], rdma_context &ctx) {
@@ -107,8 +108,8 @@ void parse_program_options(int argc, char *argv[], rdma_context &ctx) {
     desc.add_options()
             ("help", "show possible options")
             ("dev", boost::program_options::value<string>(), "rdma device to use")
-            ("src_ip", boost::program_options::value<string>(), "source ip")
-            ("dst_ip", boost::program_options::value<string>(), "destination ip")
+            ("src_ip", boost::program_options::value<vector<string> >()->multitoken(), "source IPs (one per node)")
+            ("dst_ip", boost::program_options::value<vector<string> >()->multitoken(), "destination IPs (one per node)")
             ("server", "run as server");
 
     boost::program_options::variables_map vm;
@@ -125,15 +126,19 @@ void parse_program_options(int argc, char *argv[], rdma_context &ctx) {
     else
         cerr << "the --dev argument is required" << endl;
 
-    if (vm.count("src_ip"))
-        ctx.ip_str = vm["src_ip"].as<string>();
-    else
+    if (vm.count("src_ip")) {
+        ctx.ip_strs = vm["src_ip"].as<vector<string> >();
+    } else {
         cerr << "the --src_ip argument is required" << endl;
+    }
 
-    if (vm.count("dst_ip"))
-        ctx.remote_ip_str = vm["dst_ip"].as<string>();
-    else
+    if (vm.count("dst_ip")) {
+        ctx.remote_ip_strs = vm["dst_ip"].as<vector<string> >();
+    } else {
         cerr << "the --dst_ip argument is required" << endl;
+    }
+
+    ctx.num_nodes = ctx.ip_strs.size();
 
     if (vm.count("server"))
         ctx.server = true;
@@ -223,7 +228,7 @@ void create_qps(rdma_context &ctx) {
         ctx.qp_init_attr.send_cq = ctx.write_cq;
 
         // create a QP for the write operations, using ibv_create_qp
-        ctx.write_qps[i]= ibv_create_qp(ctx.pd, &ctx.qp_init_attr);
+        ctx.write_qps[i] = ibv_create_qp(ctx.pd, &ctx.qp_init_attr);
         if (!ctx.write_qps[i]) {
             cerr << "ibv_create_qp failed: " << strerror(errno) << endl;
             ibv_destroy_qp(ctx.send_qps[i]);
@@ -282,7 +287,7 @@ void find_gid(rdma_context &ctx) {
             char interface_id[INET6_ADDRSTRLEN];
             inet_ntop(AF_INET6, &addr, interface_id, INET6_ADDRSTRLEN);
 
-            if (strncmp(ctx.ip_str.c_str(), interface_id + strlen("::ffff:"), INET_ADDRSTRLEN) == 0) {
+            if (strncmp(ctx.ip_strs[i].c_str(), interface_id + strlen("::ffff:"), INET_ADDRSTRLEN) == 0) {
                 ctx.gidIndex = entry.gid_index;
                 memcpy(&ctx.local[i].gid, &entry.gid, sizeof(ctx.local[i].gid));
                 break;
@@ -311,7 +316,7 @@ void register_memory(rdma_context &ctx) {
     for (int i = 0; i < ctx.num_nodes; i++) {
         // register the "data_send" and "data_write" buffers for RDMA operations, using ibv_reg_mr;
         // store the resulting mrs in send_mr and write_mr
-        ctx.send_mrs[i]  = ibv_reg_mr(ctx.pd, ctx.data_send, sizeof(ctx.data_send), flags);
+        ctx.send_mrs[i] = ibv_reg_mr(ctx.pd, ctx.data_send, sizeof(ctx.data_send), flags);
         if (!ctx.send_mrs[i]) {
             cerr << "ibv_reg_mr failed for node: " << i << " error: " << strerror(errno) << endl;
             for (int j = 0; j < i; j++) {
@@ -347,14 +352,14 @@ void exchange_data_info(rdma_context &ctx) {
                 exit(1);
             }
 
-            ctx.ret = send_data(ctx.local[i], ctx.remote_ip_str, i);
+            ctx.ret = send_data(ctx.local[i], ctx.remote_ip_strs[i], i);
             if (ctx.ret != 0) {
                 cerr << "send_data failed for node: " << i << endl;
                 ibv_dereg_mr(ctx.write_mrs[i]);
                 exit(1);
             }
         } else {
-            ctx.ret = send_data(ctx.local[i], ctx.remote_ip_str, i);
+            ctx.ret = send_data(ctx.local[i], ctx.remote_ip_strs[i], i);
             if (ctx.ret != 0) {
                 cerr << "send_data failed for node: " << i << endl;
                 ibv_dereg_mr(ctx.write_mrs[i]);
