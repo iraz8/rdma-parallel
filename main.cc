@@ -22,7 +22,7 @@ struct rdma_context_per_peer {
     struct ibv_qp *write_qp = nullptr;
     struct ibv_qp_init_attr qp_init_attr{};
     struct device_info local{}, remote{};
-    char data_send[100], data_write[100];
+    char data_send[512], data_write[512];
     struct ibv_mr *send_mr = nullptr;
     struct ibv_mr *write_mr = nullptr;
     struct ibv_qp_attr qp_attr{};
@@ -45,6 +45,7 @@ struct rdma_context {
     struct ibv_mr remote_write_mr{};
     struct ibv_wc wc{};
     vector<rdma_context_per_peer> peers;
+    string message;
 };
 
 void parse_program_options(int argc, char *argv[], rdma_context &ctx) {
@@ -54,7 +55,8 @@ void parse_program_options(int argc, char *argv[], rdma_context &ctx) {
             ("dev", boost::program_options::value<string>(), "rdma device to use")
             ("src_ip", boost::program_options::value<string>(), "source ip")
             ("dst_ip", boost::program_options::value<vector<string> >()->multitoken(), "destination ips")
-            ("server", "run as server");
+            ("server", "run as server")
+            ("message", boost::program_options::value<string>(), "Message to send");
 
     boost::program_options::variables_map vm;
     boost::program_options::store(boost::program_options::parse_command_line(argc, argv, desc), vm);
@@ -86,6 +88,10 @@ void parse_program_options(int argc, char *argv[], rdma_context &ctx) {
 
     if (vm.count("server"))
         ctx.server = true;
+
+    if (vm.count("message")) {
+        ctx.message = vm["message"].as<string>();
+    }
 }
 
 void get_device(rdma_context &ctx) {
@@ -218,10 +224,7 @@ void find_gid(rdma_context &ctx) {
     }
     // fill gidEntries with the GID table entries of the port, using ibv_query_gid_table
     ibv_query_gid_table(ctx.context, ctx.gidEntries, ctx.port_attr.gid_tbl_len, 0);
-    // if (ibv_query_gid_table(ctx.context, ctx.gidEntries, ctx.port_attr.gid_tbl_len, 0)) {
-    // cerr << "ibv_query_gid_table failed: " << strerror(errno) << endl;
-    // exit(1);
-    // }
+
     for (auto &entry: ctx.gidEntries) {
         // we want only RoCEv2
         if (entry.gid_type != IBV_GID_TYPE_ROCE_V2)
@@ -491,7 +494,7 @@ void server_flow(rdma_context &ctx) {
     for (int i = 0; i < ctx.peers.size(); i++) {
         memset(ctx.peers[i].data_write, 0, sizeof(ctx.peers[i].data_write));
         memset(ctx.peers[i].data_send, 0, sizeof(ctx.peers[i].data_send));
-        memcpy(ctx.peers[i].data_write, "Hello, but with write", 21);
+        memcpy(ctx.peers[i].data_write, ctx.message.c_str(), sizeof(ctx.peers[i].data_write) - 1);
 
         memset(&ctx.sg_write, 0, sizeof(ctx.sg_write));
         ctx.sg_write.addr = (uintptr_t) ctx.peers[i].write_mr->addr;
@@ -543,7 +546,7 @@ void client_flow(rdma_context &ctx) {
     for (int i = 0; i < ctx.peers.size(); i++) {
         memset(ctx.peers[i].data_write, 0, sizeof(ctx.peers[i].data_write));
         memset(ctx.peers[i].data_send, 0, sizeof(ctx.peers[i].data_send));
-        memcpy(ctx.peers[i].data_send, "Hello", 5);
+        memcpy(ctx.peers[i].data_send, ctx.message.c_str(), sizeof(ctx.peers[i].data_write) - 1);
 
         memset(&ctx.sg_recv, 0, sizeof(ctx.sg_recv));
         ctx.sg_recv.addr = (uintptr_t) ctx.peers[i].write_mr->addr;
